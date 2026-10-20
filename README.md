@@ -132,17 +132,10 @@ app/src/main/java/com/qingyi/translate/
 **为什么需要自己填 API Key？**
 翻译和识图都直接调用 DeepSeek，没有中间服务器。Key 只存在本机，费用由你自己的账户承担。
 
-**图片翻译会发几张图？**
-选框小于整图时发两张：完整画面做语境，选框做翻译目标；选框就是整图时只发一张。每张图最多约 1024 token。
 
 **数据会上传到哪？**
 只有 DeepSeek：文字、图片、追问内容会发送到 `api.deepseek.com`。没有其他后端，也没有统计 SDK。
 
-**为什么没有 iOS 版？**
-这套实现依赖 Android 的 CameraX、共享存储和 Compose；iOS 需要另写一套。相机权限、图片选择、分享菜单都要重新适配。
-
-**release 包为什么只有 1.8 MB？**
-debug 包不裁剪，`material-icons-extended` 会带进几千个图标；release 开启 R8 和资源压缩后，只剩实际用到的代码和图标。
 
 ## License
 
