@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.widget.Toast
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
@@ -25,8 +26,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Forum
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -102,6 +106,7 @@ fun ImageTranslateScreen(
     state: AppUiState,
     viewModel: AppViewModel,
     onPickImage: () -> Unit,
+    onRetake: () -> Unit,
 ) {
     val uri = state.image.uriOrNull
     val context = LocalContext.current
@@ -143,6 +148,13 @@ fun ImageTranslateScreen(
                 fontWeight = FontWeight.Medium,
             )
             Spacer(Modifier.weight(1f))
+            IconButton(onClick = onRetake) {
+                Icon(
+                    imageVector = Icons.Filled.CameraAlt,
+                    contentDescription = "重拍",
+                    tint = QingOnSurface,
+                )
+            }
             IconButton(onClick = onPickImage) {
                 Icon(
                     imageVector = Icons.Outlined.PhotoLibrary,
@@ -177,14 +189,38 @@ fun ImageTranslateScreen(
             val density = LocalDensity.current
             val containerW = with(density) { maxWidth.toPx() }
             val containerH = with(density) { maxHeight.toPx() }
-            val scale = min(containerW / bmp.width, containerH / bmp.height)
-            val drawW = bmp.width * scale
-            val drawH = bmp.height * scale
-            val drawLeft = (containerW - drawW) / 2f
-            val drawTop = (containerH - drawH) / 2f
-            val displayRect = Rect(drawLeft, drawTop, drawLeft + drawW, drawTop + drawH)
+            val baseScale = min(containerW / bmp.width, containerH / bmp.height)
 
-            val locked = state.image is ImageUi.Success
+            // Pinch-zoom lives in screen pixels: [zoom] multiplies the fit scale and
+            // [pan] shifts the image inside the container.
+            var zoom by remember(uri) { mutableStateOf(1f) }
+            var pan by remember(uri) { mutableStateOf(Offset.Zero) }
+            var showOverlay by remember(uri) { mutableStateOf(true) }
+            val overlayActive =
+                state.image is ImageUi.Success || state.image is ImageUi.Streaming
+            // A fresh result always starts visible; hiding it is the user's call.
+            LaunchedEffect(overlayActive) {
+                if (overlayActive) showOverlay = true
+            }
+
+            fun imageRect(): Rect {
+                val s = baseScale * zoom
+                val w = bmp.width * s
+                val h = bmp.height * s
+                val maxX = ((w - containerW) / 2f).coerceAtLeast(0f)
+                val maxY = ((h - containerH) / 2f).coerceAtLeast(0f)
+                val left = (containerW - w) / 2f + pan.x.coerceIn(-maxX, maxX)
+                val top = (containerH - h) / 2f + pan.y.coerceIn(-maxY, maxY)
+                return Rect(left, top, left + w, top + h)
+            }
+
+            val displayRect = imageRect()
+            val drawW = displayRect.width
+            val drawH = displayRect.height
+            val drawLeft = displayRect.left
+            val drawTop = displayRect.top
+
+            val locked = state.image is ImageUi.Success || state.image is ImageUi.Streaming
             val selectionRect = selection.toDisplay(displayRect)
 
             val haptic = LocalHapticFeedback.current
@@ -192,61 +228,119 @@ fun ImageTranslateScreen(
             Canvas(
                 modifier = Modifier
                     .fillMaxSize()
-                    .pointerInput(displayRect, locked) {
-                        if (locked) return@pointerInput
-
+                    .pointerInput(bmp, locked) {
                         val cornerSlop = 52.dp.toPx()
                         val edgeSlop = 44.dp.toPx()
 
-                        fun normX(x: Float) = ((x - displayRect.left) / displayRect.width).coerceIn(0f, 1f)
-                        fun normY(y: Float) = ((y - displayRect.top) / displayRect.height).coerceIn(0f, 1f)
+                        fun rect() = imageRect()
+                        fun normX(x: Float, r: Rect) = ((x - r.left) / r.width).coerceIn(0f, 1f)
+                        fun normY(y: Float, r: Rect) = ((y - r.top) / r.height).coerceIn(0f, 1f)
 
                         fun near(pos: Offset, x: Float, y: Float) =
                             (pos - Offset(x, y)).getDistance() < cornerSlop
+
+                        fun dragModeAt(pos: Offset): DragMode {
+                            if (locked) return DragMode.None
+                            val r = selection.toDisplay(rect())
+                            return when {
+                                // Corners win over edges so the 8 handles never fight.
+                                near(pos, r.left, r.top) -> DragMode.TopLeft
+                                near(pos, r.right, r.top) -> DragMode.TopRight
+                                near(pos, r.left, r.bottom) -> DragMode.BottomLeft
+                                near(pos, r.right, r.bottom) -> DragMode.BottomRight
+
+                                abs(pos.y - r.top) < edgeSlop &&
+                                    pos.x >= r.left - edgeSlop &&
+                                    pos.x <= r.right + edgeSlop -> DragMode.Top
+
+                                abs(pos.y - r.bottom) < edgeSlop &&
+                                    pos.x >= r.left - edgeSlop &&
+                                    pos.x <= r.right + edgeSlop -> DragMode.Bottom
+
+                                abs(pos.x - r.left) < edgeSlop &&
+                                    pos.y >= r.top - edgeSlop &&
+                                    pos.y <= r.bottom + edgeSlop -> DragMode.Left
+
+                                abs(pos.x - r.right) < edgeSlop &&
+                                    pos.y >= r.top - edgeSlop &&
+                                    pos.y <= r.bottom + edgeSlop -> DragMode.Right
+
+                                // Only the middle of the box moves it, never an edge.
+                                r.contains(pos) -> DragMode.Move
+                                else -> DragMode.None
+                            }
+                        }
+
+                        // Keep the pixel under [focus] fixed while zooming, so the
+                        // text the user pinched stays under their fingers.
+                        fun zoomTo(target: Float, focus: Offset) {
+                            val next = target.coerceIn(1f, 5f)
+                            if (next == zoom) return
+                            val r = rect()
+                            val u = ((focus.x - r.left) / r.width).coerceIn(0f, 1f)
+                            val v = ((focus.y - r.top) / r.height).coerceIn(0f, 1f)
+                            val factor = next / zoom
+                            val w = r.width * factor
+                            val h = r.height * factor
+                            zoom = next
+                            pan = Offset(
+                                focus.x - u * w - (containerW - w) / 2f,
+                                focus.y - v * h - (containerH - h) / 2f,
+                            )
+                        }
 
                         // No touch slop: the handle reacts from the first pixel, which
                         // is what makes native crop UIs feel immediate.
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
                             val start = down.position
-                            val r = selection.toDisplay(displayRect)
-
-                            val mode = when {
-                                // Corners win over edges so the 8 handles never fight.
-                                near(start, r.left, r.top) -> DragMode.TopLeft
-                                near(start, r.right, r.top) -> DragMode.TopRight
-                                near(start, r.left, r.bottom) -> DragMode.BottomLeft
-                                near(start, r.right, r.bottom) -> DragMode.BottomRight
-
-                                abs(start.y - r.top) < edgeSlop &&
-                                    start.x >= r.left - edgeSlop &&
-                                    start.x <= r.right + edgeSlop -> DragMode.Top
-
-                                abs(start.y - r.bottom) < edgeSlop &&
-                                    start.x >= r.left - edgeSlop &&
-                                    start.x <= r.right + edgeSlop -> DragMode.Bottom
-
-                                abs(start.x - r.left) < edgeSlop &&
-                                    start.y >= r.top - edgeSlop &&
-                                    start.y <= r.bottom + edgeSlop -> DragMode.Left
-
-                                abs(start.x - r.right) < edgeSlop &&
-                                    start.y >= r.top - edgeSlop &&
-                                    start.y <= r.bottom + edgeSlop -> DragMode.Right
-
-                                // Only the middle of the box moves it, never an edge.
-                                r.contains(start) -> DragMode.Move
-                                else -> DragMode.None
-                            }
-
-                            if (mode == DragMode.None) return@awaitEachGesture
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            var mode = DragMode.None
+                            var modeDecided = false
+                            var zooming = false
+                            var lastDistance = 0f
+                            var lastCentroid: Offset? = null
 
                             while (true) {
                                 val event = awaitPointerEvent()
+                                val pressed = event.changes.filter { it.pressed }
+                                if (pressed.isEmpty()) break
+
+                                if (pressed.size >= 2) {
+                                    // Two fingers always zoom/pan, even if a crop drag
+                                    // had already started; the crop stays untouched.
+                                    zooming = true
+                                    mode = DragMode.None
+                                    val centroid =
+                                        (pressed[0].position + pressed[1].position) / 2f
+                                    val distance =
+                                        (pressed[0].position - pressed[1].position).getDistance()
+                                    if (lastDistance > 0f && distance > 0f) {
+                                        zoomTo(zoom * (distance / lastDistance), centroid)
+                                        lastCentroid?.let { pan += centroid - it }
+                                    }
+                                    lastDistance = distance
+                                    lastCentroid = centroid
+                                    event.changes.forEach { it.consume() }
+                                    continue
+                                }
+
+                                // After a pinch, ignore the remaining finger until lift.
+                                if (zooming) {
+                                    event.changes.forEach { it.consume() }
+                                    continue
+                                }
+
                                 val change = event.changes.firstOrNull { it.id == down.id } ?: break
                                 if (!change.pressed) break
 
+                                if (!modeDecided) {
+                                    modeDecided = true
+                                    mode = dragModeAt(start)
+                                    if (mode == DragMode.None) break
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                }
+
+                                val r = rect()
                                 val pos = change.position
                                 val delta = change.positionChange()
                                 val minSize = 0.06f
@@ -255,16 +349,16 @@ fun ImageTranslateScreen(
                                     DragMode.Move -> {
                                         val w = selection.width
                                         val h = selection.height
-                                        val nl = (selection.left + delta.x / displayRect.width)
+                                        val nl = (selection.left + delta.x / r.width)
                                             .coerceIn(0f, 1f - w)
-                                        val nt = (selection.top + delta.y / displayRect.height)
+                                        val nt = (selection.top + delta.y / r.height)
                                             .coerceIn(0f, 1f - h)
                                         Rect(nl, nt, nl + w, nt + h)
                                     }
 
                                     DragMode.Top -> Rect(
                                         selection.left,
-                                        normY(pos.y).coerceAtMost(selection.bottom - minSize),
+                                        normY(pos.y, r).coerceAtMost(selection.bottom - minSize),
                                         selection.right,
                                         selection.bottom,
                                     )
@@ -273,11 +367,11 @@ fun ImageTranslateScreen(
                                         selection.left,
                                         selection.top,
                                         selection.right,
-                                        normY(pos.y).coerceAtLeast(selection.top + minSize),
+                                        normY(pos.y, r).coerceAtLeast(selection.top + minSize),
                                     )
 
                                     DragMode.Left -> Rect(
-                                        normX(pos.x).coerceAtMost(selection.right - minSize),
+                                        normX(pos.x, r).coerceAtMost(selection.right - minSize),
                                         selection.top,
                                         selection.right,
                                         selection.bottom,
@@ -286,36 +380,36 @@ fun ImageTranslateScreen(
                                     DragMode.Right -> Rect(
                                         selection.left,
                                         selection.top,
-                                        normX(pos.x).coerceAtLeast(selection.left + minSize),
+                                        normX(pos.x, r).coerceAtLeast(selection.left + minSize),
                                         selection.bottom,
                                     )
 
                                     DragMode.TopLeft -> Rect(
-                                        normX(pos.x).coerceAtMost(selection.right - minSize),
-                                        normY(pos.y).coerceAtMost(selection.bottom - minSize),
+                                        normX(pos.x, r).coerceAtMost(selection.right - minSize),
+                                        normY(pos.y, r).coerceAtMost(selection.bottom - minSize),
                                         selection.right,
                                         selection.bottom,
                                     )
 
                                     DragMode.TopRight -> Rect(
                                         selection.left,
-                                        normY(pos.y).coerceAtMost(selection.bottom - minSize),
-                                        normX(pos.x).coerceAtLeast(selection.left + minSize),
+                                        normY(pos.y, r).coerceAtMost(selection.bottom - minSize),
+                                        normX(pos.x, r).coerceAtLeast(selection.left + minSize),
                                         selection.bottom,
                                     )
 
                                     DragMode.BottomLeft -> Rect(
-                                        normX(pos.x).coerceAtMost(selection.right - minSize),
+                                        normX(pos.x, r).coerceAtMost(selection.right - minSize),
                                         selection.top,
                                         selection.right,
-                                        normY(pos.y).coerceAtLeast(selection.top + minSize),
+                                        normY(pos.y, r).coerceAtLeast(selection.top + minSize),
                                     )
 
                                     DragMode.BottomRight -> Rect(
                                         selection.left,
                                         selection.top,
-                                        normX(pos.x).coerceAtLeast(selection.left + minSize),
-                                        normY(pos.y).coerceAtLeast(selection.top + minSize),
+                                        normX(pos.x, r).coerceAtLeast(selection.left + minSize),
+                                        normY(pos.y, r).coerceAtLeast(selection.top + minSize),
                                     )
 
                                     DragMode.None -> selection
@@ -393,11 +487,15 @@ fun ImageTranslateScreen(
                 }
             }
 
-            val success = state.image as? ImageUi.Success
+            val overlayText = when (val image = state.image) {
+                is ImageUi.Success -> image.translated
+                is ImageUi.Streaming -> image.translated
+                else -> null
+            }
             when {
-                success != null -> {
+                overlayText != null && overlayText.isNotBlank() && showOverlay -> {
                     TranslatedOverlay(
-                        text = success.translated,
+                        text = overlayText,
                         rect = selectionRect,
                     )
                 }
@@ -424,9 +522,41 @@ fun ImageTranslateScreen(
                 }
             }
 
+            // One tap to compare against the original: the overlay is opaque by
+            // design, so without this the photo is unreadable behind it.
+            if (!overlayText.isNullOrBlank()) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(12.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(Color.Black.copy(alpha = 0.55f))
+                        .clickable { showOverlay = !showOverlay }
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        imageVector = if (showOverlay) {
+                            Icons.Filled.VisibilityOff
+                        } else {
+                            Icons.Filled.Visibility
+                        },
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = if (showOverlay) "看原文" else "看译文",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                    )
+                }
+            }
+
             if (!locked) {
                 Text(
-                    text = "拖动或拉伸方框，选择要翻译的区域",
+                    text = "双指缩放 · 拖动方框选择区域",
                     color = Color.White.copy(alpha = 0.9f),
                     fontSize = 12.sp,
                     textAlign = TextAlign.Center,
@@ -441,7 +571,7 @@ fun ImageTranslateScreen(
         }
 
         val success = state.image as? ImageUi.Success
-        val loading = state.image is ImageUi.Translating
+        val loading = state.image is ImageUi.Translating || state.image is ImageUi.Streaming
 
         if (state.image is ImageUi.NeedKey) {
             Row(
@@ -514,12 +644,22 @@ fun ImageTranslateScreen(
                     Text("问助手")
                 }
             } else {
-                OutlinedButton(
-                    onClick = { selection = Rect(0f, 0f, 1f, 1f) },
-                    shape = RoundedCornerShape(50),
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text("全图")
+                if (loading) {
+                    OutlinedButton(
+                        onClick = viewModel::cancelImageTranslation,
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("停止")
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = { selection = Rect(0f, 0f, 1f, 1f) },
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("全图")
+                    }
                 }
 
                 Button(

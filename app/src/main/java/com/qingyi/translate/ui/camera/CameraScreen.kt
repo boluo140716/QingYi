@@ -1,8 +1,13 @@
 package com.qingyi.translate.ui.camera
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -55,6 +60,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.qingyi.translate.ui.theme.QingAccent
 import com.qingyi.translate.ui.theme.QingBg
 import com.qingyi.translate.ui.theme.QingMuted
@@ -70,6 +77,7 @@ fun CameraScreen(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val activity = remember(context) { context.findActivity() }
 
     var hasPermission by remember {
         mutableStateOf(
@@ -77,17 +85,55 @@ fun CameraScreen(
                 PackageManager.PERMISSION_GRANTED
         )
     }
+    var askedOnce by remember { mutableStateOf(false) }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { granted -> hasPermission = granted }
+    ) { granted ->
+        askedOnce = true
+        hasPermission = granted
+    }
+
+    // Returning from the system settings page must re-check, otherwise the screen
+    // keeps claiming the permission is missing after the user granted it.
+    DisposableEffect(lifecycleOwner, context) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                hasPermission = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.CAMERA,
+                ) == PackageManager.PERMISSION_GRANTED
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     LaunchedEffect(Unit) {
-        if (!hasPermission) permissionLauncher.launch(Manifest.permission.CAMERA)
+        if (!hasPermission) {
+            askedOnce = true
+            permissionLauncher.launch(Manifest.permission.CAMERA)
+        }
     }
 
     if (!hasPermission) {
+        // A second denial makes the system dialog a no-op, so the only way forward
+        // is the app's settings page.
+        val blocked = askedOnce &&
+            activity?.shouldShowRequestPermissionRationale(Manifest.permission.CAMERA) != true
         PermissionScreen(
-            onRequest = { permissionLauncher.launch(Manifest.permission.CAMERA) },
+            blocked = blocked,
+            onRequest = {
+                askedOnce = true
+                permissionLauncher.launch(Manifest.permission.CAMERA)
+            },
+            onOpenSettings = {
+                context.startActivity(
+                    Intent(
+                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.fromParts("package", context.packageName, null),
+                    )
+                )
+            },
             onPickImage = onPickImage,
             onClose = onClose,
         )
@@ -278,7 +324,9 @@ private fun ShutterButton(enabled: Boolean, onClick: () -> Unit) {
 
 @Composable
 private fun PermissionScreen(
+    blocked: Boolean,
     onRequest: () -> Unit,
+    onOpenSettings: () -> Unit,
     onPickImage: () -> Unit,
     onClose: () -> Unit,
 ) {
@@ -298,18 +346,31 @@ private fun PermissionScreen(
         )
         Spacer(Modifier.height(10.dp))
         Text(
-            text = "开启后才能拍照识别文字。也可以直接从相册选一张图。",
+            text = if (blocked) {
+                "相机权限已被关闭。请在系统设置里打开「轻译」的相机权限，也可以直接从相册选一张图。"
+            } else {
+                "开启后才能拍照识别文字。也可以直接从相册选一张图。"
+            },
             color = QingMuted,
             fontSize = 14.sp,
             textAlign = TextAlign.Center,
             lineHeight = 21.sp,
         )
         Spacer(Modifier.height(22.dp))
-        Button(
-            onClick = onRequest,
-            shape = RoundedCornerShape(50),
-        ) {
-            Text(text = "授予相机权限")
+        if (blocked) {
+            Button(
+                onClick = onOpenSettings,
+                shape = RoundedCornerShape(50),
+            ) {
+                Text(text = "去系统设置")
+            }
+        } else {
+            Button(
+                onClick = onRequest,
+                shape = RoundedCornerShape(50),
+            ) {
+                Text(text = "授予相机权限")
+            }
         }
         Spacer(Modifier.height(8.dp))
         TextButton(onClick = onPickImage) {
@@ -320,4 +381,13 @@ private fun PermissionScreen(
             Text(text = "返回", color = QingMuted)
         }
     }
+}
+
+private fun Context.findActivity(): Activity? {
+    var current: Context = this
+    while (current is ContextWrapper) {
+        if (current is Activity) return current
+        current = current.baseContext
+    }
+    return null
 }

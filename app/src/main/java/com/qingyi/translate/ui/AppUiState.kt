@@ -14,6 +14,9 @@ enum class Screen {
 sealed interface TranslationUi {
     data object Idle : TranslationUi
     data object Loading : TranslationUi
+
+    /** Partial text while the SSE stream is still arriving. */
+    data class Streaming(val text: String) : TranslationUi
     data class Success(val text: String) : TranslationUi
     data class Failure(val message: String) : TranslationUi
     data object NeedKey : TranslationUi
@@ -24,6 +27,9 @@ sealed interface ImageUi {
     data object None : ImageUi
     data class Editing(val uri: Uri) : ImageUi
     data class Translating(val uri: Uri) : ImageUi
+
+    /** Partial overlay text while the SSE stream is still arriving. */
+    data class Streaming(val uri: Uri, val translated: String) : ImageUi
     data class Success(val uri: Uri, val translated: String) : ImageUi
     data class Failure(val uri: Uri, val message: String) : ImageUi
     data class NeedKey(val uri: Uri) : ImageUi
@@ -34,6 +40,7 @@ val ImageUi.uriOrNull: Uri?
         ImageUi.None -> null
         is ImageUi.Editing -> uri
         is ImageUi.Translating -> uri
+        is ImageUi.Streaming -> uri
         is ImageUi.Success -> uri
         is ImageUi.Failure -> uri
         is ImageUi.NeedKey -> uri
@@ -61,6 +68,8 @@ data class AppUiState(
     val screen: Screen = Screen.TRANSLATE,
     val inputText: String = "",
     val source: Language? = null,
+    /** Filled in by the model when [source] is null (auto-detect). */
+    val detectedLanguage: String? = null,
     val target: Language = Language.CHINESE_SIMPLIFIED,
     val translation: TranslationUi = TranslationUi.Idle,
     val image: ImageUi = ImageUi.None,

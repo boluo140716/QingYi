@@ -13,6 +13,15 @@ class SettingsStore(context: Context) {
         model = prefs.getString(KEY_MODEL, DEFAULT_MODEL).orEmpty(),
     )
 
+    /** Null means "never chosen", so the caller can fall back to the device locale. */
+    fun loadTargetLanguage(): Language? =
+        prefs.getString(KEY_TARGET_LANGUAGE, null)
+            ?.let { name -> runCatching { Language.valueOf(name) }.getOrNull() }
+
+    fun saveTargetLanguage(language: Language) {
+        prefs.edit().putString(KEY_TARGET_LANGUAGE, language.name).apply()
+    }
+
     fun save(settings: DeepSeekSettings) {
         prefs.edit()
             .putString(KEY_API_KEY, settings.apiKey.trim())
@@ -26,6 +35,7 @@ class SettingsStore(context: Context) {
         private const val KEY_API_KEY = "api_key"
         private const val KEY_BASE_URL = "base_url"
         private const val KEY_MODEL = "model"
+        private const val KEY_TARGET_LANGUAGE = "target_language"
 
         const val DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
         const val DEFAULT_MODEL = "deepseek-flash"

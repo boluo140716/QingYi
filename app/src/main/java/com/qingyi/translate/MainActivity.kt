@@ -33,7 +33,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -51,6 +50,7 @@ import com.qingyi.translate.ui.theme.QingAccent
 import com.qingyi.translate.ui.theme.QingAccentSoft
 import com.qingyi.translate.ui.theme.QingBg
 import com.qingyi.translate.ui.theme.QingMuted
+import com.qingyi.translate.ui.theme.QingOnAccent
 import com.qingyi.translate.ui.theme.QingOnSurface
 import com.qingyi.translate.ui.theme.QingYiTheme
 import com.qingyi.translate.ui.translate.TranslationScreen
@@ -132,6 +132,7 @@ private fun AppRoot(appViewModel: AppViewModel) {
                         state = state,
                         viewModel = appViewModel,
                         onPickImage = pickImage,
+                        onRetake = { appViewModel.go(Screen.CAMERA) },
                     )
 
                     Screen.SETTINGS -> SettingsScreen(
@@ -240,7 +241,7 @@ private fun CameraAction(onClick: () -> Unit) {
             Icon(
                 imageVector = Icons.Filled.CameraAlt,
                 contentDescription = "相机",
-                tint = Color.White,
+                tint = QingOnAccent,
                 modifier = Modifier.size(32.dp),
             )
         }

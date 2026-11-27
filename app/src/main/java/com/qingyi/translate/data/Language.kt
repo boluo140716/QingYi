@@ -1,5 +1,7 @@
 package com.qingyi.translate.data
 
+import java.util.Locale
+
 /**
  * Languages offered in the picker. DeepSeek can handle far more than this list,
  * but a curated list keeps the picker quick to scan.
@@ -31,4 +33,44 @@ enum class Language(
     TURKISH("土耳其语", "土耳其语"),
     DUTCH("荷兰语", "荷兰语"),
     POLISH("波兰语", "波兰语"),
+    ;
+
+    companion object {
+        /**
+         * Picks a sensible default target from the device language, so an English
+         * phone does not open with "translate into Chinese". Falls back to
+         * Simplified Chinese, the app's primary audience.
+         */
+        fun forLocale(locale: Locale): Language = when (locale.language.lowercase()) {
+            "zh" -> if (
+                locale.country.equals("TW", true) ||
+                locale.country.equals("HK", true) ||
+                locale.country.equals("MO", true)
+            ) {
+                CHINESE_TRADITIONAL
+            } else {
+                CHINESE_SIMPLIFIED
+            }
+
+            "en" -> ENGLISH
+            "ja" -> JAPANESE
+            "ko" -> KOREAN
+            "fr" -> FRENCH
+            "de" -> GERMAN
+            "es" -> SPANISH
+            "pt" -> PORTUGUESE
+            "ru" -> RUSSIAN
+            "it" -> ITALIAN
+            "ar" -> ARABIC
+            "th" -> THAI
+            "vi" -> VIETNAMESE
+            "id", "in" -> INDONESIAN
+            "ms" -> MALAY
+            "hi" -> HINDI
+            "tr" -> TURKISH
+            "nl" -> DUTCH
+            "pl" -> POLISH
+            else -> CHINESE_SIMPLIFIED
+        }
+    }
 }

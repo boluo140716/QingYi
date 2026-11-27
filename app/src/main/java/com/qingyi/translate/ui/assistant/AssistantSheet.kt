@@ -1,5 +1,6 @@
 package com.qingyi.translate.ui.assistant
 
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -16,13 +17,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -33,8 +36,12 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
@@ -49,6 +56,7 @@ import com.qingyi.translate.ui.theme.QingAccent
 import com.qingyi.translate.ui.theme.QingBg
 import com.qingyi.translate.ui.theme.QingCard
 import com.qingyi.translate.ui.theme.QingMuted
+import com.qingyi.translate.ui.theme.QingOnAccent
 import com.qingyi.translate.ui.theme.QingOnSurface
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -58,6 +66,35 @@ fun AssistantSheet(state: AppUiState, viewModel: AppViewModel) {
 
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val hasImageContext = state.image is ImageUi.Success
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    val listState = rememberLazyListState()
+
+    val turns = state.assistant.turns
+    // The placeholder answer is invisible until the first characters arrive; a
+    // spinner reads better than an empty bubble.
+    val streamingText = turns.lastOrNull()
+        ?.takeIf { it.role == AssistantRole.ASSISTANT }
+        ?.text
+    val showThinking = state.assistant.loading && streamingText.isNullOrEmpty()
+    val visibleTurns = if (showThinking) turns.dropLast(1) else turns
+
+    // Without this the newest answer lands below the fold and reads as "no response".
+    LaunchedEffect(visibleTurns.size, showThinking, streamingText?.length) {
+        val target = if (showThinking) visibleTurns.size else visibleTurns.size - 1
+        if (target >= 0) {
+            if (state.assistant.loading) {
+                listState.scrollToItem(target)
+            } else {
+                listState.animateScrollToItem(target)
+            }
+        }
+    }
+
+    val copyText: (String) -> Unit = { text ->
+        clipboard.setText(AnnotatedString(text))
+        Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+    }
 
     ModalBottomSheet(
         onDismissRequest = viewModel::closeAssistant,
@@ -88,10 +125,11 @@ fun AssistantSheet(state: AppUiState, viewModel: AppViewModel) {
             Spacer(Modifier.height(12.dp))
 
             LazyColumn(
+                state = listState,
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                if (state.assistant.turns.isEmpty() && !state.assistant.loading) {
+                if (visibleTurns.isEmpty() && !state.assistant.loading) {
                     item {
                         Text(
                             text = "可以问我：这句话为什么这么翻、有没有更口语的说法、某个词在语境里的意思……",
@@ -102,11 +140,17 @@ fun AssistantSheet(state: AppUiState, viewModel: AppViewModel) {
                     }
                 }
 
-                items(state.assistant.turns) { turn ->
-                    TurnBubble(turn)
+                itemsIndexed(visibleTurns) { index, turn ->
+                    TurnBubble(
+                        turn = turn,
+                        streaming = state.assistant.loading &&
+                            index == visibleTurns.lastIndex &&
+                            turn.role == AssistantRole.ASSISTANT,
+                        onCopy = copyText,
+                    )
                 }
 
-                if (state.assistant.loading) {
+                if (showThinking) {
                     item {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -192,12 +236,12 @@ fun AssistantSheet(state: AppUiState, viewModel: AppViewModel) {
 }
 
 @Composable
-private fun TurnBubble(turn: AssistantTurn) {
+private fun TurnBubble(turn: AssistantTurn, streaming: Boolean, onCopy: (String) -> Unit) {
     val isUser = turn.role == AssistantRole.USER
 
-    Row(
+    Column(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
+        horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
     ) {
         Box(
             modifier = Modifier
@@ -214,11 +258,27 @@ private fun TurnBubble(turn: AssistantTurn) {
                 .padding(horizontal = 14.dp, vertical = 10.dp),
         ) {
             Text(
-                text = turn.text,
-                color = if (isUser) androidx.compose.ui.graphics.Color.White else QingOnSurface,
+                text = if (streaming) turn.text + "▌" else turn.text,
+                color = if (isUser) QingOnAccent else QingOnSurface,
                 fontSize = 14.sp,
                 lineHeight = 21.sp,
             )
+        }
+
+        // A better phrasing is only useful once copied, so answers get their own
+        // copy affordance instead of forcing a manual selection.
+        if (!isUser) {
+            IconButton(
+                onClick = { onCopy(turn.text) },
+                modifier = Modifier.size(36.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.ContentCopy,
+                    contentDescription = "复制回答",
+                    tint = QingMuted,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
         }
     }
 }

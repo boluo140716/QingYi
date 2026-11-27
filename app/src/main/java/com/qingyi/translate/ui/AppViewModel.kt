@@ -13,6 +13,7 @@ import com.qingyi.translate.data.ChatTurn
 import com.qingyi.translate.data.DeepSeekClient
 import com.qingyi.translate.data.DeepSeekSettings
 import com.qingyi.translate.data.Language
+import com.qingyi.translate.data.LanguageTag
 import com.qingyi.translate.data.SettingsStore
 import com.qingyi.translate.data.TranslateResult
 import kotlinx.coroutines.Dispatchers
@@ -21,13 +22,20 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
+import java.util.Locale
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private val settingsStore = SettingsStore(application)
     private val client = DeepSeekClient()
 
-    var state by mutableStateOf(AppUiState(settings = settingsStore.load()))
+    var state by mutableStateOf(
+        AppUiState(
+            settings = settingsStore.load(),
+            target = settingsStore.loadTargetLanguage()
+                ?: Language.forLocale(Locale.getDefault()),
+        )
+    )
         private set
 
     private var translationJob: Job? = null
@@ -48,9 +56,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun onInputChange(text: String) {
         if (text == state.inputText) return
+        // Editing invalidates both the result and the in-flight requests, otherwise
+        // a late response lands on the new text/language and looks mismatched.
+        translationJob?.cancel()
+        assistantJob?.cancel()
         state = state.copy(
             inputText = text,
             translation = TranslationUi.Idle,
+            detectedLanguage = null,
             assistant = AssistantUi(),
         )
     }
@@ -60,6 +73,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         state = state.copy(
             inputText = "",
             translation = TranslationUi.Idle,
+            detectedLanguage = null,
             assistant = AssistantUi(),
         )
     }
@@ -73,22 +87,63 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        state = state.copy(translation = TranslationUi.Loading, assistant = AssistantUi())
+        state = state.copy(
+            translation = TranslationUi.Loading,
+            detectedLanguage = null,
+            assistant = AssistantUi(),
+        )
         translationJob = viewModelScope.launch {
+            var lastEmit = 0L
             val result = client.translateText(
                 settings = state.settings,
                 text = text,
                 sourceName = state.source?.promptName,
                 targetName = state.target.promptName,
+                onDelta = { partial ->
+                    // Repaint at most every ~60 ms: smooth enough to read, cheap
+                    // enough to keep recomposition off the streaming hot path.
+                    val now = System.nanoTime()
+                    if (now - lastEmit >= 60_000_000L) {
+                        lastEmit = now
+                        withContext(Dispatchers.Main) {
+                            val visible = LanguageTag.visible(partial)
+                            val detected = LanguageTag.split(partial).first
+                            state = state.copy(
+                                translation = TranslationUi.Streaming(visible),
+                                detectedLanguage = detected ?: state.detectedLanguage,
+                            )
+                        }
+                    }
+                },
             )
             if (!isActive) return@launch
-            state = state.copy(
-                translation = when (result) {
-                    is TranslateResult.Success -> TranslationUi.Success(result.text)
-                    is TranslateResult.Error -> TranslationUi.Failure(result.message)
+            state = when (result) {
+                is TranslateResult.Success -> {
+                    val (detected, cleanText) = LanguageTag.split(result.text)
+                    state.copy(
+                        translation = TranslationUi.Success(cleanText),
+                        detectedLanguage = detected ?: state.detectedLanguage,
+                    )
                 }
-            )
+
+                is TranslateResult.Error -> state.copy(
+                    translation = TranslationUi.Failure(result.message)
+                )
+            }
         }
+    }
+
+    /** Stops the in-flight text request and keeps whatever text already arrived. */
+    fun cancelTranslation() {
+        translationJob?.cancel()
+        val partial = (state.translation as? TranslationUi.Streaming)?.text
+        state = state.copy(
+            translation = if (partial.isNullOrBlank()) {
+                TranslationUi.Idle
+            } else {
+                TranslationUi.Success(partial)
+            }
+        )
     }
 
     fun retryTextTranslation() = translateNow()
@@ -105,24 +160,32 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectLanguage(language: Language?) {
         val picker = state.languagePicker ?: return
+        translationJob?.cancel()
+        assistantJob?.cancel()
         state = if (picker.forSource) {
             state.copy(
                 source = language,
                 languagePicker = null,
                 translation = TranslationUi.Idle,
+                detectedLanguage = null,
                 assistant = AssistantUi(),
             )
         } else {
+            val newTarget = language ?: state.target
+            settingsStore.saveTargetLanguage(newTarget)
             state.copy(
-                target = language ?: state.target,
+                target = newTarget,
                 languagePicker = null,
                 translation = TranslationUi.Idle,
+                detectedLanguage = null,
                 assistant = AssistantUi(),
             )
         }
     }
 
     fun swapLanguages() {
+        translationJob?.cancel()
+        assistantJob?.cancel()
         val oldSource = state.source
         val oldTarget = state.target
         val newSource = oldTarget
@@ -132,11 +195,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             Language.CHINESE_SIMPLIFIED
         }
         val swappedText = (state.translation as? TranslationUi.Success)?.text
+        settingsStore.saveTargetLanguage(newTarget)
         state = state.copy(
             source = newSource,
             target = newTarget,
             inputText = swappedText ?: state.inputText,
             translation = TranslationUi.Idle,
+            detectedLanguage = null,
             assistant = AssistantUi(),
         )
     }
@@ -188,29 +253,66 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val isFullSelection = crop.width >= full.width - 1 && crop.height >= full.height - 1
             val targetBitmap = if (isFullSelection) full else crop
 
-            val targetBase64 = withContext(Dispatchers.Default) { encodeJpeg(targetBitmap) }
+            // A crop covering most of the frame already carries the scene; a second
+            // copy would only double the upload for no extra context.
+            val cropArea = crop.width.toLong() * crop.height
+            val fullArea = full.width.toLong() * full.height
+            val needsContext = !isFullSelection && cropArea * 100 < fullArea * 75
+
+            val targetBase64 = withContext(Dispatchers.Default) {
+                encodeJpeg(targetBitmap, maxSide = 1600, quality = 85)
+            }
             val contextBase64 = withContext(Dispatchers.Default) {
-                if (isFullSelection) null else encodeJpeg(full)
+                if (needsContext) encodeJpeg(full, maxSide = 1024, quality = 75) else null
             }
             lastImageBase64 = targetBase64
             lastContextBase64 = contextBase64
 
+            var lastEmit = 0L
             val result = client.translateImage(
                 settings = state.settings,
                 jpegBase64 = targetBase64,
                 contextJpegBase64 = contextBase64,
                 sourceName = state.source?.promptName,
                 targetName = state.target.promptName,
+                onDelta = { partial ->
+                    val now = System.nanoTime()
+                    if (now - lastEmit >= 60_000_000L) {
+                        lastEmit = now
+                        withContext(Dispatchers.Main) {
+                            state = state.copy(
+                                image = ImageUi.Streaming(uri, LanguageTag.visible(partial))
+                            )
+                        }
+                    }
+                },
             )
             if (!isActive) return@launch
 
             state = state.copy(
                 image = when (result) {
-                    is TranslateResult.Success -> ImageUi.Success(uri, result.text)
+                    // The model may prefix a `[[语言]]` marker for auto-detect;
+                    // it is metadata, not part of the overlay text.
+                    is TranslateResult.Success ->
+                        ImageUi.Success(uri, LanguageTag.split(result.text).second)
                     is TranslateResult.Error -> ImageUi.Failure(uri, result.message)
                 }
             )
         }
+    }
+
+    /** Stops the in-flight image request and keeps whatever text already arrived. */
+    fun cancelImageTranslation() {
+        imageJob?.cancel()
+        val uri = state.image.uriOrNull ?: return
+        val partial = (state.image as? ImageUi.Streaming)?.translated
+        state = state.copy(
+            image = if (partial.isNullOrBlank()) {
+                ImageUi.Editing(uri)
+            } else {
+                ImageUi.Success(uri, partial)
+            }
+        )
     }
 
     fun retryImage() {
@@ -230,8 +332,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun encodeJpeg(bitmap: Bitmap): String {
-        val maxSide = 2048
+    private fun encodeJpeg(bitmap: Bitmap, maxSide: Int, quality: Int): String {
         val longest = maxOf(bitmap.width, bitmap.height)
         val scaled = if (longest > maxSide) {
             val ratio = maxSide.toFloat() / longest
@@ -246,7 +347,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         val out = ByteArrayOutputStream()
-        scaled.compress(Bitmap.CompressFormat.JPEG, 88, out)
+        scaled.compress(Bitmap.CompressFormat.JPEG, quality, out)
         return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
     }
 
@@ -295,10 +396,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val sourceText = state.inputText
         val isFirstImageTurn = state.assistant.turns.isEmpty()
 
+        val streamingTurn = AssistantTurn(AssistantRole.ASSISTANT, "")
         state = state.copy(
             assistant = state.assistant.copy(
                 open = true,
-                turns = turns,
+                turns = turns + streamingTurn,
                 input = "",
                 loading = true,
                 error = null,
@@ -314,6 +416,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
 
+            // Same 60 ms repaint budget as translation: the bubble follows the
+            // stream without recomposing on every token.
+            var lastEmit = 0L
+            val onDelta: suspend (String) -> Unit = { partial ->
+                val now = System.nanoTime()
+                if (now - lastEmit >= 60_000_000L) {
+                    lastEmit = now
+                    withContext(Dispatchers.Main) {
+                        state = state.copy(
+                            assistant = state.assistant.copy(
+                                turns = turns + streamingTurn.copy(text = partial)
+                            )
+                        )
+                    }
+                }
+            }
+
             val result = when {
                 imageSuccess != null && lastImageBase64 != null -> client.askAboutImage(
                     settings = state.settings,
@@ -323,6 +442,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     targetName = target.promptName,
                     turns = history,
                     includeImage = isFirstImageTurn,
+                    onDelta = onDelta,
                 )
 
                 textSuccess != null -> client.askAboutText(
@@ -331,6 +451,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     translation = textSuccess.text,
                     targetName = target.promptName,
                     turns = history,
+                    onDelta = onDelta,
                 )
 
                 else -> TranslateResult.Error("当前没有可用的翻译内容")
@@ -340,20 +461,34 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             state = when (result) {
                 is TranslateResult.Success -> state.copy(
                     assistant = state.assistant.copy(
-                        turns = turns + AssistantTurn(AssistantRole.ASSISTANT, result.text),
+                        turns = turns + streamingTurn.copy(text = result.text),
                         loading = false,
                         error = null,
                     )
                 )
 
-                is TranslateResult.Error -> state.copy(
-                    assistant = state.assistant.copy(
-                        turns = turns.dropLast(1),
-                        input = q,
-                        loading = false,
-                        error = result.message,
-                    )
-                )
+                is TranslateResult.Error -> {
+                    // Keep whatever already streamed in; dropping it would punish
+                    // the user for a timeout that arrived after a usable answer.
+                    val partial = state.assistant.turns.lastOrNull()?.text.orEmpty()
+                    if (partial.isNotBlank()) {
+                        state.copy(
+                            assistant = state.assistant.copy(
+                                loading = false,
+                                error = result.message,
+                            )
+                        )
+                    } else {
+                        state.copy(
+                            assistant = state.assistant.copy(
+                                turns = turns.dropLast(1),
+                                input = q,
+                                loading = false,
+                                error = result.message,
+                            )
+                        )
+                    }
+                }
             }
         }
     }
@@ -372,6 +507,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             state.screen == Screen.IMAGE && state.image != ImageUi.None -> Screen.IMAGE
             else -> Screen.TRANSLATE
         }
-        state = state.copy(settings = settings, screen = target, languagePicker = null)
+        // Saving a key resolves the "needs key" placeholders. Without this the user
+        // returns to a card that still claims no key is configured.
+        val translation = if (state.translation is TranslationUi.NeedKey) {
+            TranslationUi.Idle
+        } else {
+            state.translation
+        }
+        val image = when (val current = state.image) {
+            is ImageUi.NeedKey -> ImageUi.Editing(current.uri)
+            else -> current
+        }
+        state = state.copy(
+            settings = settings,
+            screen = target,
+            languagePicker = null,
+            translation = translation,
+            image = image,
+        )
     }
 }

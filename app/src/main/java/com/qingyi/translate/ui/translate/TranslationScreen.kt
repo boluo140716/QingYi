@@ -3,6 +3,7 @@ package com.qingyi.translate.ui.translate
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,16 +16,17 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Forum
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.CircularProgressIndicator
@@ -36,17 +38,16 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qingyi.translate.data.Language
@@ -58,6 +59,7 @@ import com.qingyi.translate.ui.theme.QingAccent
 import com.qingyi.translate.ui.theme.QingBg
 import com.qingyi.translate.ui.theme.QingCard
 import com.qingyi.translate.ui.theme.QingMuted
+import com.qingyi.translate.ui.theme.QingOnAccent
 import com.qingyi.translate.ui.theme.QingOnSurface
 import com.qingyi.translate.ui.theme.QingPill
 
@@ -83,7 +85,8 @@ fun TranslationScreen(
                     onTextChange = viewModel::onInputChange,
                     onClear = viewModel::clearInput,
                     onTranslate = viewModel::translateNow,
-                    isTranslating = state.translation == TranslationUi.Loading,
+                    isTranslating = state.translation == TranslationUi.Loading ||
+                        state.translation is TranslationUi.Streaming,
                     modifier = Modifier.weight(1f),
                 )
 
@@ -91,6 +94,7 @@ fun TranslationScreen(
                     Spacer(Modifier.height(2.dp))
                     ResultCard(
                         target = state.target,
+                        detected = state.detectedLanguage,
                         state = state.translation,
                         onCopy = { text ->
                             clipboard.setText(AnnotatedString(text))
@@ -99,6 +103,7 @@ fun TranslationScreen(
                         onRetry = viewModel::retryTextTranslation,
                         onOpenSettings = { viewModel.go(Screen.SETTINGS) },
                         onAsk = viewModel::openAssistant,
+                        onStop = viewModel::cancelTranslation,
                         modifier = Modifier.weight(1f),
                     )
                 }
@@ -109,6 +114,7 @@ fun TranslationScreen(
 
         LanguageSelector(
             source = state.source,
+            detected = state.detectedLanguage,
             target = state.target,
             onSourceClick = { viewModel.openLanguagePicker(true) },
             onTargetClick = { viewModel.openLanguagePicker(false) },
@@ -169,7 +175,7 @@ private fun TopBar(onSettings: () -> Unit) {
         ) {
             Text(
                 text = "译",
-                color = androidx.compose.ui.graphics.Color.White,
+                color = QingOnAccent,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
             )
@@ -188,7 +194,6 @@ private fun InputCard(
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
-    val focusManager = LocalFocusManager.current
 
     Surface(
         modifier = modifier.fillMaxWidth(),
@@ -208,13 +213,6 @@ private fun InputCard(
                     lineHeight = 38.sp,
                 ),
                 cursorBrush = SolidColor(QingAccent),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                keyboardActions = KeyboardActions(
-                    onGo = {
-                        focusManager.clearFocus()
-                        onTranslate()
-                    }
-                ),
             )
 
             if (text.isEmpty()) {
@@ -269,7 +267,7 @@ private fun InputCard(
                     if (isTranslating) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(18.dp),
-                            color = androidx.compose.ui.graphics.Color.White,
+                            color = QingOnAccent,
                             strokeWidth = 2.dp,
                         )
                     } else {
@@ -326,13 +324,27 @@ private fun PasteChip(onClick: () -> Unit) {
 @Composable
 private fun ResultCard(
     target: Language,
+    detected: String?,
     state: TranslationUi,
     onCopy: (String) -> Unit,
     onRetry: () -> Unit,
     onOpenSettings: () -> Unit,
     onAsk: (String?) -> Unit,
+    onStop: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val resultScroll = rememberScrollState()
+    val shownText = when (state) {
+        is TranslationUi.Success -> state.text
+        is TranslationUi.Streaming -> state.text
+        else -> null
+    }
+
+    // Follow the stream so the newest characters stay on screen.
+    LaunchedEffect(shownText) {
+        if (shownText != null) resultScroll.scrollTo(Int.MAX_VALUE)
+    }
+
     Surface(
         modifier = modifier.fillMaxWidth(),
         color = QingCard,
@@ -343,37 +355,55 @@ private fun ResultCard(
                 .fillMaxSize()
                 .padding(24.dp),
         ) {
-            Text(
-                text = target.displayName,
-                color = QingMuted,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Medium,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (!detected.isNullOrBlank()) {
+                    Text(
+                        text = detected,
+                        color = QingAccent,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Text(
+                        text = "  →  ",
+                        color = QingMuted,
+                        fontSize = 13.sp,
+                    )
+                }
+                Text(
+                    text = target.displayName,
+                    color = QingMuted,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
             Spacer(Modifier.height(10.dp))
 
             Box(modifier = Modifier.weight(1f)) {
                 when (state) {
                     TranslationUi.Idle -> Unit
 
-                    TranslationUi.Loading -> Row(
+                    TranslationUi.Loading -> Column(
                         modifier = Modifier.align(Alignment.Center),
-                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
-                        CircularProgressIndicator(
-                            color = QingAccent,
-                            strokeWidth = 3.dp,
-                            modifier = Modifier.size(24.dp),
-                        )
-                        Spacer(Modifier.width(12.dp))
-                        Text(text = "正在翻译…", color = QingMuted, fontSize = 15.sp)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(
+                                color = QingAccent,
+                                strokeWidth = 3.dp,
+                                modifier = Modifier.size(24.dp),
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Text(text = "正在翻译…", color = QingMuted, fontSize = 15.sp)
+                        }
+                        TextButton(onClick = onStop) {
+                            Text(text = "停止", color = QingMuted, fontSize = 13.sp)
+                        }
                     }
 
-                    is TranslationUi.Success -> Text(
-                        text = state.text,
-                        color = QingOnSurface,
-                        fontSize = 28.sp,
-                        lineHeight = 36.sp,
-                    )
+                    // Long results must stay readable: the card only gets half the
+                    // screen, so the text scrolls instead of being clipped.
+                    is TranslationUi.Streaming -> ResultText(state.text + "▌", resultScroll)
+                    is TranslationUi.Success -> ResultText(state.text, resultScroll)
 
                     is TranslationUi.Failure -> Column {
                         Text(
@@ -403,6 +433,17 @@ private fun ResultCard(
                         TextButton(onClick = onOpenSettings) {
                             Text(text = "去设置", color = QingAccent)
                         }
+                    }
+                }
+            }
+
+            if (state is TranslationUi.Streaming) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    TextButton(onClick = onStop) {
+                        Text(text = "停止", color = QingMuted, fontSize = 13.sp)
                     }
                 }
             }
@@ -451,8 +492,23 @@ private fun ResultCard(
 }
 
 @Composable
+private fun ResultText(text: String, scroll: ScrollState) {
+    val long = text.length > 240
+    Text(
+        text = text,
+        color = QingOnSurface,
+        fontSize = if (long) 20.sp else 28.sp,
+        lineHeight = if (long) 29.sp else 36.sp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .verticalScroll(scroll),
+    )
+}
+
+@Composable
 private fun LanguageSelector(
     source: Language?,
+    detected: String?,
     target: Language,
     onSourceClick: () -> Unit,
     onTargetClick: () -> Unit,
@@ -465,7 +521,11 @@ private fun LanguageSelector(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         LanguagePill(
-            text = source?.displayName ?: "检测语言",
+            // Show what the model detected, with a marker so it still reads as
+            // automatic rather than a language the user picked.
+            text = source?.displayName
+                ?: detected?.let { "$it · 自动" }
+                ?: "检测语言",
             onClick = onSourceClick,
             modifier = Modifier.weight(1f),
         )
@@ -502,12 +562,22 @@ private fun LanguagePill(
                 .padding(vertical = 18.dp),
             contentAlignment = Alignment.Center,
         ) {
-            Text(
-                text = text,
-                color = QingOnSurface,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Medium,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = text,
+                    color = QingOnSurface,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+                // The pill is tappable but looked like a plain label; the chevron
+                // is what makes "choose a language" discoverable.
+                Icon(
+                    imageVector = Icons.Filled.KeyboardArrowDown,
+                    contentDescription = null,
+                    tint = QingMuted,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
         }
     }
 }

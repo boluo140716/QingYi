@@ -1,5 +1,6 @@
 package com.qingyi.translate.data
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -19,11 +20,18 @@ import java.net.UnknownHostException
  */
 class DeepSeekClient {
 
+    /**
+     * Set when a custom endpoint answers `stream = true` with plain JSON. Later
+     * calls then skip SSE so translation keeps working instead of coming back empty.
+     */
+    private var streamingUnsupported = false
+
     suspend fun translateText(
         settings: DeepSeekSettings,
         text: String,
         sourceName: String?,
         targetName: String,
+        onDelta: suspend (String) -> Unit = {},
     ): TranslateResult = withContext(Dispatchers.IO) {
         val messages = JSONArray()
             .put(
@@ -33,7 +41,7 @@ class DeepSeekClient {
             )
             .put(JSONObject().put("role", "user").put("content", text))
 
-        execute(settings, messages)
+        executeStream(settings, messages, onDelta)
     }
 
     /**
@@ -47,6 +55,7 @@ class DeepSeekClient {
         contextJpegBase64: String?,
         sourceName: String?,
         targetName: String,
+        onDelta: suspend (String) -> Unit = {},
     ): TranslateResult = withContext(Dispatchers.IO) {
         val content = JSONArray()
             .put(
@@ -56,7 +65,9 @@ class DeepSeekClient {
             )
 
         if (contextJpegBase64 != null) {
-            content.put(imageBlock(contextJpegBase64))
+            // The context frame only has to convey the scene, so it skips the
+            // `detail` hint and is uploaded much smaller by the caller.
+            content.put(imageBlock(contextJpegBase64, detail = null))
         }
         content.put(imageBlock(jpegBase64))
 
@@ -64,17 +75,17 @@ class DeepSeekClient {
             JSONObject().put("role", "user").put("content", content)
         )
 
-        execute(settings, messages)
+        executeStream(settings, messages, onDelta)
     }
 
-    private fun imageBlock(base64: String): JSONObject = JSONObject()
-        .put("type", "image_url")
-        .put(
-            "image_url",
-            JSONObject()
-                .put("url", "data:image/jpeg;base64,$base64")
-                .put("detail", "original")
-        )
+    private fun imageBlock(base64: String, detail: String? = "original"): JSONObject {
+        val imageUrl = JSONObject()
+            .put("url", "data:image/jpeg;base64,$base64")
+        if (detail != null) imageUrl.put("detail", detail)
+        return JSONObject()
+            .put("type", "image_url")
+            .put("image_url", imageUrl)
+    }
 
     /**
      * Follow-up questions about a text translation. The original text and the
@@ -86,6 +97,7 @@ class DeepSeekClient {
         translation: String,
         targetName: String,
         turns: List<ChatTurn>,
+        onDelta: suspend (String) -> Unit = {},
     ): TranslateResult = withContext(Dispatchers.IO) {
         val messages = JSONArray()
             .put(
@@ -104,7 +116,7 @@ class DeepSeekClient {
             )
         }
 
-        execute(settings, messages)
+        executeStream(settings, messages, onDelta)
     }
 
     /**
@@ -122,6 +134,7 @@ class DeepSeekClient {
         targetName: String,
         turns: List<ChatTurn>,
         includeImage: Boolean,
+        onDelta: suspend (String) -> Unit = {},
     ): TranslateResult = withContext(Dispatchers.IO) {
         val messages = JSONArray()
             .put(
@@ -178,7 +191,7 @@ class DeepSeekClient {
             )
         }
 
-        execute(settings, messages)
+        executeStream(settings, messages, onDelta)
     }
 
     private fun assistantPrompt(targetName: String): String = buildString {
@@ -240,6 +253,114 @@ class DeepSeekClient {
                     TranslateResult.Success(text)
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: UnknownHostException) {
+            TranslateResult.Error("网络不可用，请检查网络连接")
+        } catch (e: SocketTimeoutException) {
+            TranslateResult.Error("请求超时，请稍后重试")
+        } catch (e: IOException) {
+            TranslateResult.Error("网络请求失败：${e.message ?: "未知错误"}")
+        } catch (e: Exception) {
+            TranslateResult.Error("翻译失败：${e.message ?: "未知错误"}")
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
+    /**
+     * Same request as [execute], but asks the API for SSE and reports the
+     * accumulated text after every chunk. The first characters land in a few
+     * hundred milliseconds, which is what makes translation feel instant.
+     */
+    private suspend fun executeStream(
+        settings: DeepSeekSettings,
+        messages: JSONArray,
+        onDelta: suspend (String) -> Unit,
+    ): TranslateResult {
+        if (settings.apiKey.isBlank()) {
+            return TranslateResult.Error("请先在设置里填写 DeepSeek API Key")
+        }
+        if (streamingUnsupported) {
+            return execute(settings, messages)
+        }
+
+        val endpoint = endpointFor(settings.baseUrl)
+        val payload = JSONObject()
+            .put("model", settings.model.ifBlank { SettingsStore.DEFAULT_MODEL })
+            .put("temperature", 0.2)
+            .put("stream", true)
+            .put("messages", messages)
+            .toString()
+        val body = payload.toByteArray(Charsets.UTF_8)
+
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 15_000
+                readTimeout = 90_000
+                doOutput = true
+                setFixedLengthStreamingMode(body.size)
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                setRequestProperty("Accept", "text/event-stream")
+                setRequestProperty("Authorization", "Bearer ${settings.apiKey.trim()}")
+            }
+
+            connection.outputStream.use { stream ->
+                stream.write(body)
+            }
+
+            val code = connection.responseCode
+            if (code !in 200..299) {
+                val raw = connection.errorStream
+                    ?.bufferedReader(Charsets.UTF_8)
+                    ?.use { it.readText() }
+                    .orEmpty()
+                return TranslateResult.Error(httpErrorMessage(code, raw))
+            }
+
+            val accumulated = StringBuilder()
+            var sawData = false
+            connection.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    if (!line.startsWith("data:")) continue
+                    val data = line.removePrefix("data:").trim()
+                    if (data.isEmpty()) continue
+                    sawData = true
+                    if (data == "[DONE]") break
+
+                    val delta = runCatching {
+                        JSONObject(data)
+                            .optJSONArray("choices")
+                            ?.optJSONObject(0)
+                            ?.optJSONObject("delta")
+                            ?.optString("content")
+                    }.getOrNull()
+
+                    if (!delta.isNullOrEmpty()) {
+                        accumulated.append(delta)
+                        onDelta(accumulated.toString())
+                    }
+                }
+            }
+
+            // A gateway that ignored `stream` returned plain JSON, which the SSE
+            // parser skips entirely. Retry once without streaming and remember it.
+            if (!sawData && accumulated.isEmpty()) {
+                streamingUnsupported = true
+                return execute(settings, messages)
+            }
+
+            val text = accumulated.toString().trim()
+            if (text.isEmpty()) {
+                TranslateResult.Error("翻译服务返回了空内容，请重试")
+            } else {
+                TranslateResult.Success(text)
+            }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: UnknownHostException) {
             TranslateResult.Error("网络不可用，请检查网络连接")
         } catch (e: SocketTimeoutException) {
@@ -257,13 +378,16 @@ class DeepSeekClient {
         append("你是专业的翻译引擎。请把用户提供的文本翻译成")
         append(targetName)
         append("。\n规则：\n")
-        append("1. 只输出译文，不要解释，不要加引号，不要附原文。\n")
+        append("1. ")
+        if (sourceName == null) append("除语言标记那一行外，")
+        append("只输出译文，不要解释，不要加引号，不要附原文。\n")
         append("2. 保留原文的段落和换行结构。\n")
         append("3. 如果原文已经是")
         append(targetName)
         append("，原样返回。\n")
         if (sourceName == null) {
-            append("4. 请自动判断源语言。")
+            append("4. 请自动判断源语言。\n")
+            append("5. 在译文之前单独输出一行 [[源语言的中文名称]]，例如 [[英语]]，然后从下一行开始输出译文。")
         } else {
             append("4. 源语言是")
             append(sourceName)
@@ -297,7 +421,8 @@ class DeepSeekClient {
         append("4. 如果图片里没有可翻译的文字，只输出：未识别到文字。\n")
 
         if (sourceName == null) {
-            append("5. 请自动判断源语言。")
+            append("5. 请自动判断源语言。\n")
+            append("6. 在译文之前单独输出一行 [[源语言的中文名称]]，例如 [[英语]]，然后从下一行开始输出译文。")
         } else {
             append("5. 源语言是")
             append(sourceName)
@@ -308,9 +433,12 @@ class DeepSeekClient {
     /** Accepts https://api.deepseek.com, .../v1 or a full .../chat/completions URL. */
     private fun endpointFor(baseUrl: String): String {
         val base = baseUrl.trim().trimEnd('/')
+        // Most compatible gateways end at /v1, but some use /v4 (智谱),
+        // /v1beta/openai (Gemini) or /openai (GitHub Models).
+        val compatibleRoots = listOf("/v1", "/v2", "/v3", "/v4", "/openai", "/v1beta/openai")
         return when {
             base.endsWith("/chat/completions") -> base
-            base.endsWith("/v1") -> "$base/chat/completions"
+            compatibleRoots.any { base.endsWith(it) } -> "$base/chat/completions"
             else -> "$base/v1/chat/completions"
         }
     }
