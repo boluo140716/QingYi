@@ -498,6 +498,7 @@ fun ImageTranslateScreen(
                         text = overlayText,
                         rect = selectionRect,
                         containerWidth = containerW,
+                        containerHeight = containerH,
                     )
                 }
 
@@ -689,13 +690,18 @@ fun ImageTranslateScreen(
 }
 
 @Composable
-private fun TranslatedOverlay(text: String, rect: Rect, containerWidth: Float) {
+private fun TranslatedOverlay(
+    text: String,
+    rect: Rect,
+    containerWidth: Float,
+    containerHeight: Float,
+) {
     val density = LocalDensity.current
     val marginPx = with(density) { 8.dp.toPx() }
 
     // A narrow crop should not produce a narrow reading column: the panel keeps
     // at least ~82% of the image width, centred on the selection and clamped to
-    // the screen, while never growing taller than the selection itself.
+    // the screen.
     val panelWidth = max(
         rect.width,
         containerWidth * 0.82f,
@@ -703,20 +709,27 @@ private fun TranslatedOverlay(text: String, rect: Rect, containerWidth: Float) {
     val panelLeft = (rect.left + (rect.width - panelWidth) / 2f)
         .coerceIn(marginPx, containerWidth - panelWidth - marginPx)
 
+    // Long translations get a window taller than the crop: it is anchored to the
+    // bottom edge of the selection and grows upward, capped at 55% of the image.
+    val maxPanelHeight = (containerHeight * 0.55f)
+        .coerceAtMost(containerHeight - marginPx * 2)
+    val panelTop = (rect.bottom - maxPanelHeight)
+        .coerceIn(marginPx, containerHeight - maxPanelHeight - marginPx)
+
     val long = text.length > 140
     Box(
         modifier = Modifier
-            .offset { IntOffset(panelLeft.roundToInt(), rect.top.roundToInt()) }
+            .offset { IntOffset(panelLeft.roundToInt(), panelTop.roundToInt()) }
             .size(
                 with(density) { panelWidth.toDp() },
-                with(density) { rect.height.toDp() },
+                with(density) { maxPanelHeight.toDp() },
             ),
         contentAlignment = Alignment.BottomCenter,
     ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(max = with(density) { (rect.height * 0.94f).toDp() })
+                .heightIn(max = with(density) { maxPanelHeight.toDp() })
                 .clip(RoundedCornerShape(8.dp))
                 .background(Color(0xF21A1A1A))
                 .padding(12.dp)
