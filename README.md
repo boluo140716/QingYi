@@ -33,11 +33,14 @@
 
 | 能力 | 说明 |
 | --- | --- |
-| **文字翻译** | 输入后点“翻译”才请求，支持 20 种语言、粘贴、复制、语言互换 |
-| **图片翻译** | 相册选图，框选要翻译的区域；译文以半透明浮层盖在选框位置 |
-| **拍照翻译** | CameraX 取景，拍完直接进入框选，不用先存相册 |
-| **翻译助手** | 译文下方可继续追问：语气、语境、换个说法、为什么这么翻 |
-| **视觉理解** | 局部翻译会同时发送完整画面作为语境；整图翻译只发一张 |
+| **文字翻译** | 输入后点“翻译”才请求；20 种语言；译文流式出现，生成中可随时停止 |
+| **目标语言** | 底部胶囊手动选择，选择会记住；首次启动按系统语言决定默认值 |
+| **源语言** | 默认自动检测，并显示检测结果（如“英语 · 自动”） |
+| **图片翻译** | 相册选图，框选要翻译的区域；支持双指缩放，译文就地覆盖，可一键切回原文 |
+| **拍照翻译** | CameraX 取景，拍完直接进入框选；拍糊了可一键重拍 |
+| **翻译助手** | 译文或图片下方继续追问；回答同样流式输出，可复制 |
+| **视觉理解** | 局部翻译会同时发送完整画面作为语境；选框接近整图时只发一张 |
+| **深色模式** | 跟随系统，夜间不刺眼 |
 | **隐私** | API Key 只保存在本机，没有账号、统计或后台服务 |
 
 ## 安装
@@ -46,7 +49,7 @@
 
 - Android 7.0（API 24）及以上
 - 安装包约 **1.8 MB**
-- 首次打开：右上角头像 → 填入自己的 DeepSeek API Key
+- 首次打开：右上角“译”按钮 → 填入自己的 DeepSeek API Key
 
 也可以命令行安装：
 
@@ -56,14 +59,20 @@ adb install -r QingYi-release.apk
 
 API Key 在 [platform.deepseek.com](https://platform.deepseek.com) 创建。默认模型 `deepseek-flash`，Base URL `https://api.deepseek.com/v1`，一般不用改。
 
+各版本改动见 [CHANGELOG.md](CHANGELOG.md)。
+
+设置页的 Base URL 和模型可以改，因此也能接其他 OpenAI Chat Completions 兼容服务（OpenRouter、智谱、Gemini、局域网 Ollama 等）。注意：**图片翻译需要多模态模型**，纯文本模型只能翻文字。
+
 ## 使用
 
 1. **文字**：输入或粘贴文字 → 点“翻译”
-2. **图片**：点底部“图片” → 选图 → 拖动/拉伸选框 → “翻译选中区域”
-3. **拍照**：点底部“相机” → 对准文字 → 快门 → 框选 → 翻译
-4. **追问**：在译文下方点“解释 / 更口语”，或点对话图标继续问
+2. **目标语言**：点底部的语言胶囊（如“中文（简体）”）换语言，选择会记住
+3. **图片**：点底部“图片” → 选图 → 双指缩放 / 拖动选框 → “翻译选中区域”
+4. **拍照**：点底部“相机” → 对准文字 → 快门 → 框选 → 翻译
+5. **对照原文**：图片译文右上角点“看原文 / 看译文”来回切换
+6. **追问**：在译文下方点“解释 / 更口语”，或点对话图标继续问
 
-框选的四个角改大小，四条边单独推拉，只有框中间才整体移动；拖动时有触感反馈。
+框选的四个角改大小，四条边单独推拉，只有框中间才整体移动；拖动时有触感反馈。框选和查看结果时都可以双指缩放（1–5 倍）。
 
 ## 技术栈
 
@@ -73,11 +82,12 @@ API Key 在 [platform.deepseek.com](https://platform.deepseek.com) 创建。默�
 | 架构 | 单 Activity + `AppViewModel`（`mutableStateOf`） |
 | 相机 | CameraX 1.3.4 |
 | 图片处理 | BitmapFactory + ExifInterface（处理拍照旋转） |
-| 翻译 / 识图 | DeepSeek `deepseek-flash`，OpenAI 兼容 Chat Completions |
-| 网络 | `HttpURLConnection`（不引 OkHttp / Retrofit） |
+| 翻译 / 识图 | DeepSeek `deepseek-flash`，OpenAI 兼容 Chat Completions（SSE 流式） |
+| 网络 | `HttpURLConnection` 手写 SSE（不引 OkHttp / Retrofit） |
 | 配置 | SharedPreferences（不引 DataStore / Room） |
+| 主题 | Compose 深浅色双主题，跟随系统 |
 
-图片以 base64 `data:` URL 放在 `image_url` 内容块里发送，`detail=original`。每张图最多约 1024 token。
+图片以 base64 `data:` URL 放在 `image_url` 内容块里发送。选框图最长边压到 1600px / JPEG 85，语境图压到 1024px / JPEG 75；选框覆盖画面 75% 以上时不再重复发送语境图。
 
 ## 构建
 
@@ -109,10 +119,11 @@ apksigner sign --ks your.keystore --out QingYi-release.apk \
 app/src/main/java/com/qingyi/translate/
 ├── MainActivity.kt              # 单 Activity、底部栏、页面切换
 ├── data/
-│   ├── Language.kt              # 语言列表
+│   ├── Language.kt              # 语言列表、系统语言默认值
+│   ├── LanguageTag.kt           # 解析模型返回的 `[[源语言]]` 标记
 │   ├── DeepSeekSettings.kt      # 配置与翻译结果
 │   ├── ChatTurn.kt              # 助手对话消息
-│   ├── DeepSeekClient.kt        # 文字 / 图片 / 追问请求
+│   ├── DeepSeekClient.kt        # 文字 / 图片 / 追问请求，SSE 解析
 │   └── SettingsStore.kt         # SharedPreferences
 ├── util/BitmapUtils.kt          # 解码、EXIF 旋转、裁剪
 └── ui/
@@ -124,7 +135,7 @@ app/src/main/java/com/qingyi/translate/
     ├── camera/                  # CameraX 取景
     ├── settings/                # API Key 与模型配置
     ├── language/                # 语言选择
-    └── theme/                   # 薄荷绿配色
+    └── theme/                   # 薄荷绿配色（含 values-night 深色）
 ```
 
 ## 常见问题
@@ -132,6 +143,8 @@ app/src/main/java/com/qingyi/translate/
 **为什么需要自己填 API Key？**
 翻译和识图都直接调用 DeepSeek，没有中间服务器。Key 只存在本机，费用由你自己的账户承担。
 
+**可以换成别的模型吗？**
+可以。设置页能改 Base URL 和模型名，任何兼容 OpenAI Chat Completions 的服务都能接，例如 OpenRouter、智谱 GLM、Gemini、局域网 Ollama。图片翻译必须用多模态模型；Base URL 支持以 `/v1`、`/v4`、`/v1beta/openai` 结尾的写法。
 
 **数据会上传到哪？**
 只有 DeepSeek：文字、图片、追问内容会发送到 `api.deepseek.com`。没有其他后端，也没有统计 SDK。

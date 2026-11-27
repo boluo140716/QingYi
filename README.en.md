@@ -33,11 +33,14 @@ The layout is inspired by Google Translate, with its own name, palette and icon.
 
 | Feature | Details |
 | --- | --- |
-| **Text** | Press “Translate” to send; 20 languages, paste, copy, swap |
-| **Image** | Pick a photo, drag the crop box, translated text is overlaid in place |
-| **Camera** | CameraX preview, shutter, then crop and translate |
-| **Assistant** | Ask follow-ups about tone, context, alternatives, or why it was translated that way |
-| **Visual context** | A cropped translation also sends the full frame as context; full-image translation sends one image |
+| **Text** | Press “Translate” to send; 20 languages; the answer streams in and can be stopped mid-way |
+| **Target language** | Pick it from the bottom pill; the choice is remembered and seeded from the device language on first launch |
+| **Source language** | Auto-detected by default, with the detected language shown (“英语 · 自动”) |
+| **Image** | Pick a photo, drag the crop box, pinch to zoom; the translation is overlaid in place and can be toggled back to the original |
+| **Camera** | CameraX preview, shutter, then crop and translate; retake with one tap |
+| **Assistant** | Ask follow-ups about tone, context or alternatives; answers stream too, and can be copied |
+| **Visual context** | A cropped translation also sends the full frame as context; a near-full selection sends only one image |
+| **Dark mode** | Follows the system |
 | **Privacy** | The API key stays on the device; no account, analytics or backend |
 
 ## Install
@@ -46,7 +49,7 @@ Download `QingYi-release.apk` from [Releases](https://github.com/boluo140716/Qin
 
 - Android 7.0 (API 24) and above
 - About **1.8 MB**
-- On first launch: avatar in the top-right → paste your DeepSeek API key
+- On first launch: the “译” button in the top-right → paste your DeepSeek API key
 
 ```bash
 adb install -r QingYi-release.apk
@@ -54,14 +57,20 @@ adb install -r QingYi-release.apk
 
 Create a key at [platform.deepseek.com](https://platform.deepseek.com). Defaults: model `deepseek-flash`, base URL `https://api.deepseek.com/v1`.
 
+See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
+
+The base URL and model are editable, so any OpenAI Chat Completions-compatible service works (OpenRouter, Zhipu GLM, Gemini, a LAN Ollama, …). Note that **image translation needs a multimodal model**.
+
 ## Usage
 
 1. **Text** — type or paste, then tap “Translate”
-2. **Image** — “图片” → pick → adjust the box → “翻译选中区域”
-3. **Camera** — “相机” → aim → shutter → crop → translate
-4. **Ask** — “解释 / 更口语”, or the chat icon, to keep asking
+2. **Target** — tap the bottom pill to change the target; it is remembered
+3. **Image** — “图片” → pick → pinch / drag the box → “翻译选中区域”
+4. **Camera** — “相机” → aim → shutter → crop → translate
+5. **Compare** — “看原文 / 看译文” in the top-right of an image result
+6. **Ask** — “解释 / 更口语”, or the chat icon, to keep asking
 
-Crop handles: four corners resize, each edge moves independently, and only the centre moves the whole box. Haptic feedback on grab.
+Crop handles: four corners resize, each edge moves independently, and only the centre moves the whole box. Haptic feedback on grab. Pinch to zoom 1–5× while cropping and while reading the result.
 
 ## Stack
 
@@ -71,11 +80,12 @@ Crop handles: four corners resize, each edge moves independently, and only the c
 | Architecture | Single Activity + `AppViewModel` (`mutableStateOf`) |
 | Camera | CameraX 1.3.4 |
 | Images | BitmapFactory + ExifInterface |
-| Translate / vision | DeepSeek `deepseek-flash`, OpenAI-compatible Chat Completions |
-| Network | `HttpURLConnection` (no OkHttp / Retrofit) |
+| Translate / vision | DeepSeek `deepseek-flash`, OpenAI-compatible Chat Completions (SSE) |
+| Network | `HttpURLConnection` with a hand-written SSE parser (no OkHttp / Retrofit) |
 | Settings | SharedPreferences (no DataStore / Room) |
+| Theme | Compose light/dark palettes, follows the system |
 
-Images are sent as base64 `data:` URLs inside `image_url` blocks with `detail=original`, capped at ~1024 tokens each.
+Images are sent as base64 `data:` URLs inside `image_url` blocks. The crop is capped at 1600 px / JPEG 85 and the context frame at 1024 px / JPEG 75; when the crop covers 75%+ of the frame the context image is skipped.
 
 ## Build
 
@@ -106,8 +116,8 @@ apksigner sign --ks your.keystore --out QingYi-release.apk \
 **Why do I need my own API key?**
 Translation and vision call DeepSeek directly — there is no relay server. The key stays on your device and you pay your own usage.
 
-**How many images are sent?**
-A crop smaller than the full frame sends two: the full frame for context and the crop to translate. A full-frame selection sends one. Each image costs at most ~1024 tokens.
+**Can I use another model?**
+Yes. The base URL and model are editable, so any OpenAI Chat Completions-compatible service works: OpenRouter, Zhipu GLM, Gemini, a LAN Ollama, and so on. Image translation requires a multimodal model. Base URLs ending in `/v1`, `/v4` or `/v1beta/openai` are all handled.
 
 **Where does my data go?**
 Only to DeepSeek (`api.deepseek.com`): text, images and follow-up questions. No other backend, no analytics SDK.
