@@ -240,12 +240,15 @@ class DeepSeekClient {
             if (code !in 200..299) {
                 TranslateResult.Error(httpErrorMessage(code, raw))
             } else {
-                val text = JSONObject(raw)
-                    .optJSONArray("choices")
-                    ?.optJSONObject(0)
-                    ?.optJSONObject("message")
-                    ?.optString("content")
-                    ?.trim()
+                // Same guard as the streaming path: a JSON null must not become
+                // the string "null" (non-streaming gateways hit this too).
+                val text = (
+                    JSONObject(raw)
+                        .optJSONArray("choices")
+                        ?.optJSONObject(0)
+                        ?.optJSONObject("message")
+                        ?.opt("content") as? String
+                    )?.trim()
 
                 if (text.isNullOrBlank()) {
                     TranslateResult.Error("翻译服务返回了空内容，请重试")
@@ -331,12 +334,17 @@ class DeepSeekClient {
                     sawData = true
                     if (data == "[DONE]") break
 
+                    // `optString` turns a JSON null into the literal "null",
+                    // which is what leaked into the streaming overlay. Only a
+                    // real string is a text delta.
                     val delta = runCatching {
-                        JSONObject(data)
-                            .optJSONArray("choices")
-                            ?.optJSONObject(0)
-                            ?.optJSONObject("delta")
-                            ?.optString("content")
+                        (
+                            JSONObject(data)
+                                .optJSONArray("choices")
+                                ?.optJSONObject(0)
+                                ?.optJSONObject("delta")
+                                ?.opt("content")
+                            ) as? String
                     }.getOrNull()
 
                     if (!delta.isNullOrEmpty()) {

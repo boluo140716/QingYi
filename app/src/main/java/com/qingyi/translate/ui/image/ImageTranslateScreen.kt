@@ -497,6 +497,7 @@ fun ImageTranslateScreen(
                     TranslatedOverlay(
                         text = overlayText,
                         rect = selectionRect,
+                        containerWidth = containerW,
                     )
                 }
 
@@ -688,13 +689,26 @@ fun ImageTranslateScreen(
 }
 
 @Composable
-private fun TranslatedOverlay(text: String, rect: Rect) {
+private fun TranslatedOverlay(text: String, rect: Rect, containerWidth: Float) {
     val density = LocalDensity.current
+    val marginPx = with(density) { 8.dp.toPx() }
+
+    // A narrow crop should not produce a narrow reading column: the panel keeps
+    // at least ~82% of the image width, centred on the selection and clamped to
+    // the screen, while never growing taller than the selection itself.
+    val panelWidth = max(
+        rect.width,
+        containerWidth * 0.82f,
+    ).coerceAtMost(containerWidth - marginPx * 2)
+    val panelLeft = (rect.left + (rect.width - panelWidth) / 2f)
+        .coerceIn(marginPx, containerWidth - panelWidth - marginPx)
+
+    val long = text.length > 140
     Box(
         modifier = Modifier
-            .offset { IntOffset(rect.left.roundToInt(), rect.top.roundToInt()) }
+            .offset { IntOffset(panelLeft.roundToInt(), rect.top.roundToInt()) }
             .size(
-                with(density) { rect.width.toDp() },
+                with(density) { panelWidth.toDp() },
                 with(density) { rect.height.toDp() },
             ),
         contentAlignment = Alignment.BottomCenter,
@@ -702,17 +716,17 @@ private fun TranslatedOverlay(text: String, rect: Rect) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(max = with(density) { (rect.height * 0.8f).toDp() })
-                .clip(RoundedCornerShape(6.dp))
-                .background(Color(0xE61A1A1A))
-                .padding(8.dp)
+                .heightIn(max = with(density) { (rect.height * 0.94f).toDp() })
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color(0xF21A1A1A))
+                .padding(12.dp)
                 .verticalScroll(rememberScrollState()),
         ) {
             Text(
                 text = text,
                 color = Color.White,
-                fontSize = 14.sp,
-                lineHeight = 20.sp,
+                fontSize = if (long) 15.sp else 18.sp,
+                lineHeight = if (long) 22.sp else 26.sp,
             )
         }
     }
